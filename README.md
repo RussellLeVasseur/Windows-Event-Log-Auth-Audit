@@ -1,5 +1,5 @@
 # WindowsAuthAudit
-Script to pull authentication logs, remote and local, from windows event logs and write them to logs files.
+Script to pull authentication logs (including RDP) from windows desktop or server event logs and write them to easily readable logs files. 
 
 Script will create log files to keep track of authentication events by device hostname, device serial number, and domain username.
 
