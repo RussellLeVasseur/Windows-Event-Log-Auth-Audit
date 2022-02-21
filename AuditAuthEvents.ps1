@@ -50,8 +50,8 @@ Function FetchAuth {
 
     $DeviceName = hostname;
 
-    $HostLogDir = "$RemoteLogDir\hostname\$(hostname)";
-    $HostLogFile = "$HostLogDir\$(hostname)_$($FileDate)_Auth.log";
+    $HostLogDir = "$RemoteLogDir\hostname\$($DeviceName)";
+    $HostLogFile = "$HostLogDir\$($DeviceName)_$($FileDate)_Auth.log";
 
     $SnLogDir = "$RemoteLogDir\serial\$($SerialNumber)";
     $SnLogFile = "$SnLogDir\$($SerialNumber)_$($FileDate)_Auth.log";
@@ -69,8 +69,8 @@ Function FetchAuth {
         port=$SmtpPort;
     }
 
-    $ScriptLogDir = "$RemoteLogDir\scriptLog\$SerialNumber\$(hostname)";
-    $ScriptLogFile = "$ScriptLogDir\$(hostname)_$($SerialNumber)_$($FileDate)_Auth.log";
+    $ScriptLogDir = "$RemoteLogDir\scriptLog\$SerialNumber\$DeviceName";
+    $ScriptLogFile = "$ScriptLogDir\$($DeviceName)_$($SerialNumber)_$($FileDate)_Auth.log";
 
 
 ####################################################################################################
@@ -92,7 +92,7 @@ Function FetchAuth {
         }
     }
     WriteLog -Log "------------------------------ $(Get-Date -UFormat "%d-%b-%Y %T %Z") ------------------------------";
-    WriteLog -Log "$(hostname) > $($PSScriptRoot)"
+    WriteLog -Log "$DeviceName > $PSScriptRoot"
     WriteLog -Log "Fetching Authentication Logs from $Earliest to $Latest";
 
 
@@ -101,18 +101,8 @@ Function FetchAuth {
 ####################################################################################################
     WriteLog -Log "Checking for Directories and Files...";
     Function CheckFiles  {
-        param( [Object] $Dir, [Object] $File, [String] $User)
+        param( [Object] $File, [String] $User)
         Try {
-            $Dir | ForEach-Object { 
-                If (-NOT (Test-Path -Path $_)){ 
-                    New-Item -ItemType Directory -Path $_;
-                    If ($User -AND $DeviceName -notlike 'EPS-112') {
-                        $EmailParams.Subject = "New User Login - $($User)";
-                        $EmailParams.Body = $html+"$($DeviceName)<br><br>$($User) Log file Created.<br><br>$($Dir)";
-                        Send-MailMessage @EmailParams -BodyAsHtml;
-                    }
-                }
-            }
             $File | ForEach-Object {
                 If (-NOT (Test-Path -Path $_ -PathType Leaf)) { 
                     New-Item -ItemType File -Path $_ -Force;
@@ -126,7 +116,7 @@ Function FetchAuth {
             }
         } Catch { WriteLog -Log "[ERROR] Error with Directories and Files." -Data $_; }
     }
-    CheckFiles -Dir $LocalDir, $ScriptLogDir, $RemoteLogDir, $HostLogDir, $SnLogDir, $ScriptLogDir -File $EmailAlertLog, $LocalLogFile, $HostLogFile, $SnLogFile, $ScriptLogFile
+    CheckFiles -File $EmailAlertLog, $LocalLogFile, $HostLogFile, $SnLogFile, $ScriptLogFile
 
 
 ####################################################################################################
@@ -149,7 +139,7 @@ Function FetchAuth {
                 User = "$(@($_.Properties[6].Value,".")[!$_.Properties[6].Value];)\$($_.Properties[5].Value)";
                 OriginIp = $IpAddress;
                 OriginHost = '';
-                HostName = hostname;
+                HostName = $DeviceName;
                 HostSN = $SerialNumber;
                 InvalidUser = $true;
             }
@@ -202,7 +192,7 @@ Function FetchAuth {
                 User = "$($_.Properties[2].Value)\$($_.Properties[1].Value)";
                 OriginIp = '127.0.0.1';
                 OriginHost = '';
-                HostName = hostname;
+                HostName = $DeviceName;
                 HostSN = $SerialNumber;
                 InvalidUser = $true;
             }
@@ -232,7 +222,7 @@ Function FetchAuth {
                 User = "$($_.Properties[1].Value)\$($_.Properties[0].Value)";
                 OriginIp = "$($_.Properties[5].Value)";
                 OriginHost = "$($_.Properties[4].Value)";
-                HostName = hostname;
+                HostName = $DeviceName;
                 HostSN = $SerialNumber;
                 InvalidUser = $true;
             }
@@ -266,7 +256,7 @@ Function FetchAuth {
                 User = (New-Object System.Security.Principal.SecurityIdentifier $_.Properties[1].Value.Value).Translate([System.Security.Principal.NTAccount]).Value;
                 OriginIp = '127.0.0.1';
                 OriginHost = '';
-                HostName = hostname;
+                HostName = $DeviceName;
                 HostSN = $SerialNumber;
                 InvalidUser = $true;
             }
@@ -299,7 +289,7 @@ Function FetchAuth {
                     User = (New-Object System.Security.Principal.SecurityIdentifier $_.Properties[1].Value.Value).Translate([System.Security.Principal.NTAccount]).Value;
                     OriginIp = '127.0.0.1';
                     OriginHost = '';
-                    HostName = hostname;
+                    HostName = $DeviceName;
                     HostSN = $SerialNumber;
                     InvalidUser = $true;
                 }
@@ -331,7 +321,7 @@ Function FetchAuth {
                 User = "$($_.Properties[1].Value)\$($_.Properties[0].Value)";
                 OriginIp = $_.Properties[2].Value;
                 OriginHost = '';
-                HostName = hostname;
+                HostName = $DeviceName;
                 HostSN = $SerialNumber;
                 InvalidUser = $true;
             }
@@ -357,7 +347,7 @@ Function FetchAuth {
                 User = $_.Properties[0].Value;
                 OriginIp = @('127.0.0.1',$_.Properties[2].Value)[($_.Properties[2].Value -ne $null)];
                 OriginHost = '';
-                HostName = hostname;
+                HostName = $DeviceName;
                 HostSN = $SerialNumber;
                 InvalidUser = $true;
             }
@@ -441,8 +431,8 @@ Function FetchAuth {
             If (!$LastEmailAlert -OR $FailedLogins -ge ($PrevAlertFailed + $AlertThreshold)) {
                 $html = '<style type="text/css">th{text-align: left; border-bottom: 1pt solid black; padding:0 8px;} td{padding:0 8px;}</style>';
                 "$($FailedLogins )|$(Get-Date)" | Out-File -FilePath $EmailAlertLog -Force;
-                $EmailParams.Subject = "High Number of Failed Logins - $(hostname)";
-                $EmailParams.Body = $html+"Hostname: $(hostname)`n`n"+($AuthEvents | Where-Object { $_.OriginIp -ne '128.186.25.7' } | Sort-Object Time | Select-Object EventId,Time,Event,User,OriginIp | ConvertTo-Html -AS Table | Out-String);
+                $EmailParams.Subject = "High Number of Failed Logins - $DeviceName";
+                $EmailParams.Body = $html+"Hostname: $DeviceName`n`n"+($AuthEvents | Where-Object { $_.OriginIp -ne '128.186.25.7' } | Sort-Object Time | Select-Object EventId,Time,Event,User,OriginIp | ConvertTo-Html -AS Table | Out-String);
                 Send-MailMessage @EmailParams -BodyAsHtml;
                 "$($FailedLogins)|$(Get-Date)" | Out-File -FilePath $EmailAlertLog -Force;
             }
