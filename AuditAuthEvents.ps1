@@ -1,104 +1,92 @@
-####################################################################################################
-# Custom Configurations
-####################################################################################################
+param (
+    [Object]$ConfigFile=''
+)
 
-# Email Notifications about too many failed logins
-$EmailFrom = "";
-$EmailTo = "";
-$SmtpServer = ""
-$SmtpPort = "";
+If (!$ConfigFile) { Exit 1; }
+$Config = (Get-Content $ConfigFile) | ConvertFrom-Json;
 
-# Active Directory Domain
-$Domain = "";
-
-# Local directory to store files and logs
-$LocalDir = 'C:\AuthAudit';
-
-# Remote file share for centralized log keeping
-$RemoteLogDir = "\\path\to\log\files";
-
-# Name to give email alert record file
-$EmailAlertLog = 'EmailAlerts.log';
-
-# Number of failed logins to allow before sending an alert. If not triggered, will reset each new month.
-[int]$AlertThreshold = 3;
-
-# Whether or not to check for potentially missed logs the month prior
-$CheckMonthBefore = $true;
-
-# Source IPs for to ignored failed attempts from.
-# Typically used to reduce alert spam resulting from a vulnerability scanner
-$IgnoredIps = @(
-    ''
-    ''
-    ''
-    ''
-);
-
+$EmailParams = @{
+    From=$Config.EmailParams.From;
+    To=$Config.EmailParams.To;
+    SMTPServer=$Config.EmailParams.SMTPServer;
+    port=$Config.EmailParams.Port;
+}
 
 ####################################################################################################
-# Script Begin
+# Variable Declarations
 ####################################################################################################
 Clear-Host;
-Function FetchAuth {
-    param (
-        [datetime]$Earliest,
-        [datetime]$Latest,
-        [string]$FileDate
-    )
 
-    $AuthEvents = @();
-    $FailedLogins = 0;
+$ScriptLogDir = "$($Config.RemoteLogDir)\scriptLog\$SerialNumber\$DeviceName";
+$ScriptLogFile = "$ScriptLogDir\$($DeviceName)_$($SerialNumber)_$(Get-Date -UFormat "%Y-%b")_Auth.log";
 
-    $SerialNumber = (Get-WMIObject -Class Win32_BIOS).SerialNumber;
-
-    $DeviceName = hostname;
-
-    $HostLogDir = "$RemoteLogDir\hostname\$($DeviceName)";
-    $HostLogFile = "$HostLogDir\$($DeviceName)_$($FileDate)_Auth.log";
-
-    $SnLogDir = "$RemoteLogDir\serial\$($SerialNumber)";
-    $SnLogFile = "$SnLogDir\$($SerialNumber)_$($FileDate)_Auth.log";
-
-    $LocalLogFile = "$LocalDir\Logs\Auth\($FileDate)_Auth.log";
-
-    $EmailAlertLog = "$LocalDir\$EmailAlertLog";
-
-    $EmailParams = @{
-        From=$EmailFrom;
-        To=$EmailTo;
-        Subject="";
-        Body="";
-        SMTPServer=$SmtpServer;
-        port=$SmtpPort;
-    }
-
-    $ScriptLogDir = "$RemoteLogDir\scriptLog\$SerialNumber\$DeviceName";
-    $ScriptLogFile = "$ScriptLogDir\$($DeviceName)_$($SerialNumber)_$($FileDate)_Auth.log";
+If (-NOT (Test-Path -Path "$($Config.LocalDir)\FailedEmailAlert.json" -PathType Leaf)) { 
+    Write-Host "No log file!"
+    New-Item -ItemType File -Path "$($Config.LocalDir)\FailedEmailAlert.json" -Force;
+    $DefaultData = [Hashtable]@{
+        "$((Get-Date -UFormat "%b%Y"))" = [PSCustomObject]@{
+            Last_Notified = (Get-Date -Day 1 -Hour 0 -Minute 0 -Second 0).DateTime;
+            Failed_Count = 0;
+        }
+    };
+    Set-Content -Path "$($Config.LocalDir)\FailedEmailAlert.json" -Value ($DefaultData | ConvertTo-Json);
+    $FailedEmailAlerts = (Get-Content -Path "$($Config.LocalDir)\FailedEmailAlert.json" | ConvertFrom-Json); 
+} Else { $FailedEmailAlerts = (Get-Content -Path "$($Config.LocalDir)\FailedEmailAlert.json" | ConvertFrom-Json); }
 
 
 ####################################################################################################
 # Log Function 
 ####################################################################################################
-    Function WriteLog {
-        param( [String] $Log, [Object[]] $Data )
-        $Date = ((Get-Date -UFormat "%d-%b-%Y_%T") -replace ':', '-');
-        Switch -WildCard ($Log) {
-            "*success*" { Write-Host "[$Date] $Log" -f "Green"; }
-            "*ERROR*" { Write-Host "[$Date] $Log" -f "Red"; }
-            "*NEW*" { Write-Host "[$Date] $Log" -f "Yellow"; }
-            Default { Write-Host "[$Date] $Log" -f "Magenta"; }
-        }
-        If ($Data) { $Data = ($Data | Out-String).Trim().Split("`n") | ForEach-Object { Write-Host "`t$_"}; }
-        If ($Log) { Add-Content $ScriptLogFile "[$Date] $Log"; }
-        If ($Data) {
-            ($Data | Out-String).Trim().Split("`n") | ForEach-Object { Add-Content $ScriptLogFile ("`t" + "$_".Trim()) };
-        }
+Function WriteLog {
+    param( [String] $Log, [Object[]] $Data )
+    $Date = ((Get-Date -UFormat "%d-%b-%Y_%T") -replace ':', '-');
+    Switch -WildCard ($Log) {
+        "*success*" { Write-Host "[$Date] $Log" -f "Green"; }
+        "*ERROR*" { Write-Host "[$Date] $Log" -f "Red"; }
+        "*NEW*" { Write-Host "[$Date] $Log" -f "Yellow"; }
+        Default { Write-Host "[$Date] $Log" -f "Magenta"; }
     }
-    WriteLog -Log "------------------------------ $(Get-Date -UFormat "%d-%b-%Y %T %Z") ------------------------------";
-    WriteLog -Log "$DeviceName > $PSScriptRoot"
-    WriteLog -Log "Fetching Authentication Logs from $Earliest to $Latest";
+    If ($Data) { $Data = ($Data | Out-String).Trim().Split("`n") | ForEach-Object { Write-Host "`t$_"}; }
+    If ($Log) { Add-Content $ScriptLogFile "[$Date] $Log"; }
+    If ($Data) {
+        ($Data | Out-String).Trim().Split("`n") | ForEach-Object { Add-Content $ScriptLogFile ("`t" + "$_".Trim()) };
+    }
+}
+WriteLog -Log "------------------------------ $(Get-Date -UFormat "%d-%b-%Y %T %Z") ------------------------------";
+WriteLog -Log "$DeviceName > $PSScriptRoot"
 
+
+####################################################################################################
+# Fetch Auth Function 
+####################################################################################################
+Function FetchAuth {
+    param (
+        [datetime]$Earliest,
+        [datetime]$Latest,
+        [string]$FileDate,
+        [int]$AlertThreshold = $Config.AlertThreshold
+    )
+    WriteLog -Log "Fetching Authentication Logs from $Earliest to $Latest";
+    $AuthEvents = @();
+    $FailedLogins = 0;
+    $SerialNumber = (Get-WMIObject -Class Win32_BIOS).SerialNumber;
+    
+    $DeviceName = hostname;
+    $HostLogDir = "$($Config.RemoteLogDir)\hostname\$($DeviceName)";
+    $HostLogFile = "$HostLogDir\$($DeviceName)_$($FileDate)_Auth.log";
+    $SnLogDir = "$($Config.RemoteLogDir)\serial\$($SerialNumber)";
+    $SnLogFile = "$SnLogDir\$($SerialNumber)_$($FileDate)_Auth.log";
+    $LocalLogFile = "$($Config.LocalDir)\Logs\$($FileDate)_Auth.log";
+
+    If (!$FailedEmailAlerts."$((Get-Date -Date $Earliest -UFormat "%b%Y"))") {
+        $FailedEmailAlerts | Add-Member -MemberType NoteProperty -Name "$((Get-Date -Date $Earliest -UFormat "%b%Y"))" -Value @{
+            Last_Notified = (Get-Date -Date $Earliest -Day 1 -Hour 0 -Minute 0 -Second 0).DateTime;
+            Failed_Count = 0;
+        }
+        Set-Content -Path "$($Config.LocalDir)\FailedEmailAlert.json" -Value ($FailedEmailAlerts | ConvertTo-Json);
+    }
+    $LastEmailAlert = $FailedEmailAlerts."$((Get-Date -Date $Earliest -UFormat "%b%Y"))";
+    
 
 ####################################################################################################
 # Check if Directory and File Exist 
@@ -114,13 +102,12 @@ Function FetchAuth {
                     Add-Content $_ "____________________________________________________________________________________________________________________________________________________________________________________";
                     If($_ -ne $ScriptLogFile) {
                         Add-Content $_ "|    EventId     |        Time         |           Event             |             User               |     Origin IP     |    Origin Host    |     Hostname     |    Serial#     |";
-                        Clear-Content -Path $EmailAlertLog;
                     }
                 }
             }
         } Catch { WriteLog -Log "[ERROR] Error with Directories and Files." -Data $_; }
     }
-    CheckFiles -File $EmailAlertLog, $LocalLogFile, $HostLogFile, $SnLogFile, $ScriptLogFile
+    CheckFiles -File $LocalLogFile, $HostLogFile, $SnLogFile, $ScriptLogFile
 
 
 ####################################################################################################
@@ -135,7 +122,7 @@ Function FetchAuth {
             EndTime=$Latest;
         } -ErrorAction SilentlyContinue | Select-Object * | ForEach-Object {
             $IpAddress = @('127.0.0.1',$_.Properties[19].Value)[($null -ne $_.Properties[19].Value)];
-            If ($IgnoredIps -NotContains $IpAddress) { $FailedLogins++; }
+            If ($Config.IgnoredIps -NotContains $IpAddress) { $FailedLogins++; }
             $AuthEvents += New-Object PSObject -Property @{
                 EventId = $_.RecordId;
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
@@ -363,56 +350,69 @@ Function FetchAuth {
 ####################################################################################################
 # Sanitize Usernames
 ####################################################################################################
-    ForEach ($Event in $AuthEvents) {
-        If ($Event.User -like "$($Domain)*") {
-            $UserToCheck = ($Event.User).Split('\')[1];
+    Function ValidateUser {
+
+        param( [String] $Username);
+
+        If ($Username -like "$($Config.Domain)*") {
+            $UserToCheck = (($Username).Split('\')[1]).Trim();
             Try {
                 Get-ADUser $UserToCheck | Out-Null;
-                $Event.InvalidUser = $false;
+                return $Username;
             } Catch {
-                $Event.InvalidUser = $true;
+                $InvalidUser = $true;
                 $LegitUser = '';
                 $UserCharArray = $UserToCheck.ToCharArray();
                 $CharNum = 0;
                 Do {
                     $LegitUser = $LegitUser+$UserCharArray[$CharNum];
+                    $LegitUser
                     Try {
                         Get-ADUser $LegitUser | Out-Null;
-                        $Event.User = $LegitUser;
-                        $Event.InvalidUser = $false;
+                        $Username = $LegitUser;
+                        $InvalidUser = $false;
                     } Catch {
                         $CharNum++;
-                        If ($CharNum -gt 20) { Break; }
+                        If ($Charnum -ge $UserCharArray.Length -OR $CharNum -gt 20) {
+                            $ToReplace = $UserToCheck.Substring(3,$UserToCheck.Length-6);
+                            return "$(($Username).Split('\')[0])\$($UserToCheck -replace $ToReplace,'********')";
+                        }
                     }
-                } While ($Event.InvalidUser);
+                } While ($InvalidUser);
             }
         }
+        return $Username;
     }
 
 
 ####################################################################################################
 # Check Logs and Write Missing Logs
 ####################################################################################################
-    WriteLog -Log "Checking Logs and Writing Missing Logs...";
+    WriteLog -Log "Checking Logs and Writing Missing Logs to $FileDate files...";
     Try {
         $AuthEvents = $AuthEvents | Sort-Object Time;
         $AuthEvents | ForEach-Object {
-            $Log = "|  $("$($_.EventId)".PadLeft(12,"0"))  |  $($_.Time)  |  $(($_.Event).padRight(25))  |  $(($_.User).padRight(28))  |  $(($_.OriginIp).padRight(15))  |  $(($_.OriginHost).padRight(15))  |  $(($_.HostName).padRight(14))  |  $(($_.HostSN).padRight(12))  |";
-            $LocalLogFile, $HostLogFile, $SnLogFile | ForEach-Object {
-                If (-NOT (Select-String -Path $_ -Pattern "$Log" -SimpleMatch)) { 
-                    Add-Content $_ $Log; 
-                    WriteLog -Log "Missing Log:   $Log";
+            If (($Earliest).Month -eq (Get-Date -Date $_.Time).Month) {
+                $Log = "|  $("$($_.EventId)".PadLeft(12,"0"))  |  $($_.Time)  |  $(($_.Event).padRight(25))  |  $(($_.User).padRight(28))  |  $(($_.OriginIp).padRight(15))  |  $(($_.OriginHost).padRight(15))  |  $(($_.HostName).padRight(14))  |  $(($_.HostSN).padRight(12))  |";
+                $HostLogFile, $SnLogFile | ForEach-Object {
+                    If (-NOT (Select-String -Path $_ -Pattern "$Log" -SimpleMatch)) { 
+                        Add-Content $_ $Log; 
+                        WriteLog -Log "Missing Log:   $Log";
+                    }
                 }
-            }
-            If (!$_.InvalidUser -OR $_.User -eq 'Administrator') {
-                $User = ($_.User).Split('\')[1];
-                $UserLogDir = "$($RemoteLogDir)\user\$($User -replace '[^\w-]', '')";
-                $UserLogFile = "$($UserLogDir)\$($User -replace '[^\w-]', '')_$($FileDate)_Auth.log";
-                CheckFiles -Dir $UserLogDir -File $UserLogFile -User "'$($_.User)'";
-                If (-NOT (Select-String -Path $UserLogFile -Pattern "$Log" -SimpleMatch)) { 
-                    Add-Content $UserLogFile $Log; 
-                    WriteLog -Log "Missing Log:   $Log";
+                If (!$_.InvalidUser -OR $_.User -eq 'Administrator') {
+                    $User = ($_.User).Split('\')[1];
+                    $UserLogDir = "$($($Config.RemoteLogDir))\user\$($User -replace '[^\w-]', '')";
+                    $UserLogFile = "$($UserLogDir)\$($User -replace '[^\w-]', '')_$($FileDate)_Auth.log";
+                    $UserLogDirs += $UserLogDir;
+                    CheckFiles -Dir $UserLogDir -File $UserLogFile -User "'$($_.User)'";
+                    If (-NOT (Select-String -Path $UserLogFile -Pattern "$Log" -SimpleMatch)) { 
+                        Add-Content $UserLogFile $Log; 
+                        WriteLog -Log "Missing Log:   $Log";
+                    }
                 }
+                $LocalLogFile, 
+                $Log = "|  $("$($_.EventId)".PadLeft(12,"0"))  |  $($_.Time)  |  $(($_.Event).padRight(25))  |  $(($_.User).padRight(28))  |  $(($_.OriginIp).padRight(15))  |  $(($_.OriginHost).padRight(15))  |  $(($_.HostName).padRight(14))  |  $(($_.HostSN).padRight(12))  |";
             }
         }
     } Catch { WriteLog -Log "[ERROR] Error Checking Logs and Writing Missing Logs." -Data $_; }
@@ -421,39 +421,33 @@ Function FetchAuth {
 ####################################################################################################
 # Email Alerts for High Count Failed Authorization Attempts
 ####################################################################################################
-    WriteLog -Log "Checking to see if an Email Alert needs to be Sent...";
+    WriteLog -Log "Checking to see if an Email Alert needs to be sent...";
     Try {
-        $LastEmailAlert = $null;
-        $PrevAlertFailed = 0;
-        If ($FailedLogins -ge $AlertThreshold) {
-            $LastEmailAlert = Get-Content -Path $EmailAlertLog;
-            If ($LastEmailAlert) {
-                $LastAlert = $LastEmailAlert.Split('|');
-
-                $PrevAlertFailed = @(0,$LastAlert[0])[($null -ne $LastAlert[0])];
-            }
-            If (!$LastEmailAlert -OR $FailedLogins -ge ($PrevAlertFailed + $AlertThreshold)) {
+        If ($FailedLogins -ge $Config.AlertThreshold) {
+            If ($FailedLogins -ge ($LastEmailAlert.Failed_Count + $Config.AlertThreshold)) {
                 $html = '<style type="text/css">th{text-align: left; border-bottom: 1pt solid black; padding:0 8px;} td{padding:0 8px;}</style>';
-                "$($FailedLogins )|$(Get-Date)" | Out-File -FilePath $EmailAlertLog -Force;
+                $EventTable = $AuthEvents | Where-Object { $_.OriginIp -ne '128.186.25.7' } | Sort-Object Time | Select-Object EventId,Time,Event,User,OriginIp | ConvertTo-Html -AS Table | Out-String;
                 $EmailParams.Subject = "High Number of Failed Logins - $DeviceName";
-                $EmailParams.Body = $html+"Hostname: $DeviceName`n`n"+($AuthEvents | Where-Object { $_.OriginIp -ne '128.186.25.7' } | Sort-Object Time | Select-Object EventId,Time,Event,User,OriginIp | ConvertTo-Html -AS Table | Out-String);
+                $EmailParams.Body = $html+"Hostname: $DeviceName<br>Logs by Hostname: $HostLogFile<br>Logs by Serial: $SnLogFile<br>Logs by Users: $($UserLogDirs -join '<br>             ')<br><br>"+$EventTable;
                 Send-MailMessage @EmailParams -BodyAsHtml;
-                "$($FailedLogins)|$(Get-Date)" | Out-File -FilePath $EmailAlertLog -Force;
-            }
-        }
+                $LastEmailAlert.Last_Notified = (Get-Date).DateTime;
+                $LastEmailAlert.Failed_Count = $FailedLogins;
+                Set-Content -Path "$($Config.LocalDir)\FailedEmailAlert.json" -Value ($FailedEmailAlerts | ConvertTo-Json);
+            } Else { WriteLog -Log "Saw $FailedLogins Failed Logins and Needed $(($LastEmailAlert.Failed_Count + $Config.AlertThreshold)) to send an alert. (2)"; }
+        } Else { WriteLog -Log "Saw $FailedLogins Failed Logins and Needed $(($Config.AlertThreshold)) to send an alert. (1)"; }
     } Catch { WriteLog -Log "[ERROR] Error sending Email Alert." -Data $_; }
-
-    WriteLog -Log "----------------------------------------- End ----------------------------------------";
 }
 
 $EarliestLog = Get-Date -Day 1 -Hour 0 -Minute 0 -Second 0;
 
-If ($CheckMonthBefore) {
+If ($Config.CheckMonthBefore) {
     $StartTime = ((Get-Date -Date $EarliestLog).AddMonths(-1));
     $EndTime = (Get-Date -Date $EarliestLog -Hour 23 -Minute 59 -Second 59).AddDays(-1);
-    FetchAuth -Earliest $StartTime -Latest $EndTime -FileDate (Get-Date -Date $EndTime -UFormat "%Y-%b");
+    FetchAuth -Earliest $StartTime -Latest $EndTime -FileDate (Get-Date -Date $EndTime -UFormat "%Y-%b") -AlertLimit 20;
 }
 
 FetchAuth -Earliest $EarliestLog -Latest (Get-Date) -FileDate (Get-Date -UFormat "%Y-%b");
+
+WriteLog -Log "----------------------------------------- End ----------------------------------------";
 
 Exit 0;
