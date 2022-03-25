@@ -11,6 +11,8 @@ Script names files relative to the directory and separates logs by month. i.e. x
 
 ![image](https://user-images.githubusercontent.com/58618324/154983187-33b363de-835c-4f4b-8edb-20b6c17ae225.png)
 
+How to Run:
+./AuditAuthEvents.ps1 -ConfigFile \\remote\config\file
 
 Recommendations:
 - Require all powershell scripts to be signed in your domain environment. Set through Group Policy. 
