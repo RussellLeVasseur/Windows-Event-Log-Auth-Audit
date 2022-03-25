@@ -1,0 +1,28 @@
+{
+    "EmailParams": {
+		"From": "",
+		"To": "",
+		"SMTPServer": "",
+		"Port": "25"
+	},
+
+    "Domain": "",
+    
+    "LocalDir": "C:\\path\\to\\local\\folder",
+   
+    "RemoteLogDir": "\\\\path\\to\\remote\\folder",
+
+// threshold of new failed logins that will trigger an email alert.
+    "AlertThreshold": 3,
+
+// if true, will check the auth logs for the month prior to ensure all logs are present.
+    "CheckMonthBefore": true,
+
+// IPs that will be ignored for email alerting. i.e.: vulnerability scanners
+    "IgnoredIps": [
+        "",
+        "",
+        "",
+        ""
+    ]
+}
