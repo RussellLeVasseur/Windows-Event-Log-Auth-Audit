@@ -17,12 +17,19 @@ $EmailParams = @{
     SMTPServer=$Config.EmailParams.SMTPServer;
     port=$Config.EmailParams.Port;
 }
+$RandomNumber = (Get-Random -Minimum 0 -Maximum 60)*5;
 
 ####################################################################################################
 # Variable Declarations
 ####################################################################################################
 Clear-Host;
-
+$ScriptStart = Get-Date;
+$RandomNumber = (Get-Random -Minimum 0 -Maximum 60)*5;
+$Win32_BIOS = Get-WMIObject -Class Win32_BIOS;
+$Win32_BaseBoard = Get-WmiObject -Class Win32_BaseBoard;
+If ($Win32_BIOS.SerialNumber -eq "System Serial Number") {
+    $SerialNumber = ($Win32_BaseBoard.SerialNumber -replace '[\\/]','').Trim(); }
+} Else { $SerialNumber = $Win32_BIOS.SerialNumber; }
 $ScriptLogDir = "$($Config.RemoteLogDir)\scriptLog\$SerialNumber\$DeviceName";
 $ScriptLogFile = "$ScriptLogDir\$($DeviceName)_$($SerialNumber)_$(Get-Date -UFormat "%Y-%b")_Auth.log";
 
@@ -61,6 +68,69 @@ Function WriteLog {
 WriteLog -Log "------------------------------ $(Get-Date -UFormat "%d-%b-%Y %T %Z") ------------------------------";
 WriteLog -Log "$DeviceName > $PSScriptRoot"
 
+Function ValidateUser {
+    param( [PSCustomObject] $User);
+        If ($User.Username -like "$($Config.Domain)*") {
+            $UserToCheck = (($User.Username).Split('\')[1]).Trim();
+            Try {
+                Get-ADUser $UserToCheck | Out-Null;
+                $User.Invalid = $false;
+                return $User;
+            } Catch {
+                $LegitUser = '';
+                $UserCharArray = $UserToCheck.ToCharArray();
+                $CharNum = 0;
+                Do {
+                    $LegitUser = $LegitUser+$UserCharArray[$CharNum];
+                    Try {
+                        Get-ADUser $LegitUser | Out-Null;
+                        $User.Username = "$(($User.Username).Split('\')[0])\$($LegitUser)";
+                        $User.Invalid = $false;
+                        return $User;
+                    } Catch {
+                        $CharNum++;
+                        If ($Charnum -ge $UserCharArray.Length -OR $CharNum -gt 20) {
+                            $ToReplace = $UserToCheck.Substring(3,$UserToCheck.Length-6);
+                            $User.Username = "$(($User.Username).Split('\')[0])\$($UserToCheck -replace $ToReplace,'********')";
+                            return $User;
+                        }
+                    }
+                } While ($User.Invalid);
+            }
+        }
+    return $User;
+}
+
+
+########################################################################################################################################################################################################
+# Modules Requirements 
+########################################################################################################################################################################################################
+#WriteLog -Log "Checking Required Modules...";
+$RequiredModules = 'PSSQLite';
+$RequiredModules | ForEach-Object {
+    Try {
+        $Mdle = $_;
+        #WriteLog -Log "Checking for $Mdle...";
+        If (!(Get-Module -ListAvailable -Name $Mdle)) {
+            WriteLog -Log "$Mdle not found. Installing...";
+            Install-Module -Name $Mdle -Force;
+        } Else {
+            $Latest = [String](Find-Module -Name $Mdle | Sort-Object Version -Descending)[0].version;
+            $Installed = [String](Get-Module -ListAvailable $Mdle | Select-Object -First 1).version;
+            If ([System.Version]$Latest -gt [System.Version]$Installed) {
+                WriteLog -Log "[UPDATE] Updating $($Mdle)...";
+                Update-Module -Name $Mdle -Force;
+            }
+        }
+        Try { Import-Module -Name $Mdle -Force; }
+        Catch {
+            WriteLog -Log "[ERROR] Unable to Import $($Mdle) Module." -Data $_;
+            EmailAlert -Subject "[ERROR] Importing Module" -Body "$($_ | Out-String)";
+        }
+    } Catch { WriteLog -Log "[ERROR] $($_ | Out-String)"; }
+}
+WriteLog -Log "Requirements Installed and Loaded.";
+
 
 ####################################################################################################
 # Fetch Auth Function 
@@ -75,8 +145,10 @@ Function FetchAuth {
     WriteLog -Log "Fetching Authentication Logs from $Earliest to $Latest";
     $AuthEvents = @();
     $FailedLogins = 0;
-    $SerialNumber = (Get-WMIObject -Class Win32_BIOS).SerialNumber;
-    
+
+    $Query = "CREATE TABLE IF NOT EXISTS Users (username VARCHAR(20) PRIMARY KEY, lastLogin int(30))"
+    Invoke-SqliteQuery -Query $Query -DataSource $DataSource
+
     $DeviceName = hostname;
     $HostLogDir = "$($Config.RemoteLogDir)\hostname\$($DeviceName)";
     $HostLogFile = "$HostLogDir\$($DeviceName)_$($FileDate)_Auth.log";
@@ -133,12 +205,12 @@ Function FetchAuth {
                 EventId = $_.RecordId;
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                 Event = "4625 (Login Failed)";
-                User = "$(@($_.Properties[6].Value,".")[!$_.Properties[6].Value];)\$($_.Properties[5].Value)";
+                Username ="$(@($_.Properties[6].Value,".")[!$_.Properties[6].Value];)\$($_.Properties[5].Value)";
                 OriginIp = $IpAddress;
                 OriginHost = '';
                 HostName = $DeviceName;
                 HostSN = $SerialNumber;
-                InvalidUser = $true;
+                Invalid = $true;
             }
         }
     } Catch { WriteLog -Log "[ERROR] Error with Failed Authentication Events." -Data $_; }
@@ -159,9 +231,9 @@ Function FetchAuth {
             EventId=$_.RecordId
             Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
             Event = "4625 (Login Failed)";
-            User = "$(@($_.Properties[6].Value,".")[!$_.Properties[6].Value];)\$($_.Properties[5].Value)";
+            Username ="$(@($_.Properties[6].Value,".")[!$_.Properties[6].Value];)\$($_.Properties[5].Value)";
             OriginIp = @('127.0.0.1',$_.Properties[19].Value)[$_.Properties[19].Value -ne $null];
-            InvalidUser = $true;
+            Invalid = $true;
         }
     }
     #>
@@ -186,12 +258,12 @@ Function FetchAuth {
                 EventId=$_.RecordId
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                 Event = $AuthEvent;
-                User = "$($_.Properties[2].Value)\$($_.Properties[1].Value)";
+                Username ="$($_.Properties[2].Value)\$($_.Properties[1].Value)";
                 OriginIp = '127.0.0.1';
                 OriginHost = '';
                 HostName = $DeviceName;
                 HostSN = $SerialNumber;
-                InvalidUser = $true;
+                Invalid = $true;
             }
         }
     } Catch { WriteLog -Log "[ERROR] Error with Lock/Unlock Events." -Data $_; }
@@ -216,12 +288,12 @@ Function FetchAuth {
                 EventId=$_.RecordId
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                 Event = $AuthEvent;
-                User = "$($_.Properties[1].Value)\$($_.Properties[0].Value)";
+                Username ="$($_.Properties[1].Value)\$($_.Properties[0].Value)";
                 OriginIp = "$($_.Properties[5].Value)";
                 OriginHost = "$($_.Properties[4].Value)";
                 HostName = $DeviceName;
                 HostSN = $SerialNumber;
-                InvalidUser = $true;
+                Invalid = $true;
             }
         }
     } Catch { WriteLog -Log "[ERROR] Error with Reconnect/Disconnect Events." -Data $_; }
@@ -250,12 +322,12 @@ Function FetchAuth {
                 EventId=$_.RecordId
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                 Event = $AuthEvent;
-                User = (New-Object System.Security.Principal.SecurityIdentifier $_.Properties[1].Value.Value).Translate([System.Security.Principal.NTAccount]).Value;
+                Username =(New-Object System.Security.Principal.SecurityIdentifier $_.Properties[1].Value.Value).Translate([System.Security.Principal.NTAccount]).Value;
                 OriginIp = '127.0.0.1';
                 OriginHost = '';
                 HostName = $DeviceName;
                 HostSN = $SerialNumber;
-                InvalidUser = $true;
+                Invalid = $true;
             }
         }
     } Catch { WriteLog -Log "[ERROR] Error with Logon/Logoff Events." -Data $_; }
@@ -273,7 +345,6 @@ Function FetchAuth {
             StartTime=$Earliest; 
             EndTime=$Latest;
         } -ErrorAction SilentlyContinue | Select-Object * | ForEach-Object {
-            #$_
             If ($_.Properties[1].Value.Value -like "S-*") {
                 Switch ($_.Id) {
                     7001 { $AuthEvent = "7001 (Logon)"; }
@@ -283,12 +354,12 @@ Function FetchAuth {
                     EventId=$_.RecordId
                     Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                     Event = $AuthEvent;
-                    User = (New-Object System.Security.Principal.SecurityIdentifier $_.Properties[1].Value.Value).Translate([System.Security.Principal.NTAccount]).Value;
+                    Username =(New-Object System.Security.Principal.SecurityIdentifier $_.Properties[1].Value.Value).Translate([System.Security.Principal.NTAccount]).Value;
                     OriginIp = '127.0.0.1';
                     OriginHost = '';
                     HostName = $DeviceName;
                     HostSN = $SerialNumber;
-                    InvalidUser = $true;
+                    Invalid = $true;
                 }
             }
         }
@@ -315,12 +386,12 @@ Function FetchAuth {
                 EventId=$_.RecordId
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                 Event = $AuthEvent;
-                User = "$($_.Properties[1].Value)\$($_.Properties[0].Value)";
+                Username ="$($_.Properties[1].Value)\$($_.Properties[0].Value)";
                 OriginIp = $_.Properties[2].Value;
                 OriginHost = '';
                 HostName = $DeviceName;
                 HostSN = $SerialNumber;
-                InvalidUser = $true;
+                Invalid = $true;
             }
         }
 
@@ -341,12 +412,12 @@ Function FetchAuth {
                 EventId=$_.RecordId
                 Time = Get-Date $_.TimeCreated -UFormat "%d-%b-%Y %R";
                 Event = $AuthEvent;
-                User = $_.Properties[0].Value;
+                Username =$_.Properties[0].Value;
                 OriginIp = @('127.0.0.1',$_.Properties[2].Value)[($_.Properties[2].Value -ne $null)];
                 OriginHost = '';
                 HostName = $DeviceName;
                 HostSN = $SerialNumber;
-                InvalidUser = $true;
+                Invalid = $true;
             }
         }
         #>
@@ -354,74 +425,34 @@ Function FetchAuth {
 
 
 ####################################################################################################
-# Sanitize Usernames
-####################################################################################################
-    Function ValidateUser {
-
-        param( [String] $Username);
-
-        If ($Username -like "$($Config.Domain)*") {
-            $UserToCheck = (($Username).Split('\')[1]).Trim();
-            Try {
-                Get-ADUser $UserToCheck | Out-Null;
-                return $Username;
-            } Catch {
-                $InvalidUser = $true;
-                $LegitUser = '';
-                $UserCharArray = $UserToCheck.ToCharArray();
-                $CharNum = 0;
-                Do {
-                    $LegitUser = $LegitUser+$UserCharArray[$CharNum];
-                    $LegitUser
-                    Try {
-                        Get-ADUser $LegitUser | Out-Null;
-                        $Username = $LegitUser;
-                        $InvalidUser = $false;
-                    } Catch {
-                        $CharNum++;
-                        If ($Charnum -ge $UserCharArray.Length -OR $CharNum -gt 20) {
-                            $ToReplace = $UserToCheck.Substring(3,$UserToCheck.Length-6);
-                            return "$(($Username).Split('\')[0])\$($UserToCheck -replace $ToReplace,'********')";
-                        }
-                    }
-                } While ($InvalidUser);
-            }
-        }
-        return $Username;
-    }
-
-
-####################################################################################################
 # Check Logs and Write Missing Logs
 ####################################################################################################
     WriteLog -Log "Checking Logs and Writing Missing Logs to $FileDate files...";
-    Try {
-        $AuthEvents = $AuthEvents | Sort-Object Time;
-        $AuthEvents | ForEach-Object {
-            If (($Earliest).Month -eq (Get-Date -Date $_.Time).Month) {
-                $Log = "|  $("$($_.EventId)".PadLeft(12,"0"))  |  $($_.Time)  |  $(($_.Event).padRight(25))  |  $(($_.User).padRight(28))  |  $(($_.OriginIp).padRight(15))  |  $(($_.OriginHost).padRight(15))  |  $(($_.HostName).padRight(14))  |  $(($_.HostSN).padRight(12))  |";
-                $HostLogFile, $SnLogFile | ForEach-Object {
-                    If (-NOT (Select-String -Path $_ -Pattern "$Log" -SimpleMatch)) { 
-                        Add-Content $_ $Log; 
-                        WriteLog -Log "Missing Log:   $Log";
-                    }
+    $AuthEvents = $AuthEvents | Sort-Object Time;
+    ForEach ($Event in $AuthEvents) {
+        If (($Earliest).Month -eq (Get-Date -Date $Event.Time).Month) {
+            $User = ValidateUser -User $Event;
+            $Log = "|  $("$($User.EventId)".PadLeft(12,"0"))  |  $($User.Time)  |  $(($User.Event).padRight(25))  |  $(($User.Username).padRight(28))  |  $(($User.OriginIp).padRight(15))  |  $(($User.OriginHost).padRight(15))  |  $(($User.HostName).padRight(14))  |  $(($User.HostSN).padRight(12))  |";
+            $HostLogFile, $SnLogFile, $LocalLogFile | ForEach-Object {
+                If (-NOT (Select-String -Path $_ -Pattern "$Log" -SimpleMatch)) { 
+                    Add-Content $_ $Log; 
+                    WriteLog -Log "Missing Log:   $Log";
                 }
-                If (!$_.InvalidUser -OR $_.User -eq 'Administrator') {
-                    $User = ($_.User).Split('\')[1];
-                    $UserLogDir = "$($($Config.RemoteLogDir))\user\$($User -replace '[^\w-]', '')";
-                    $UserLogFile = "$($UserLogDir)\$($User -replace '[^\w-]', '')_$($FileDate)_Auth.log";
-                    $UserLogDirs += $UserLogDir;
-                    CheckFiles -Dir $UserLogDir -File $UserLogFile -User "'$($_.User)'";
-                    If (-NOT (Select-String -Path $UserLogFile -Pattern "$Log" -SimpleMatch)) { 
-                        Add-Content $UserLogFile $Log; 
-                        WriteLog -Log "Missing Log:   $Log";
-                    }
+            }
+            If (!$User.Invalid -OR $User.Username -eq '.\Administrator') {
+                $User = ($User.Username).Split('\')[1];
+                $UserLogDir = "$($($Config.RemoteLogDir))\user\$($User -replace '[^\w-]', '')";
+                $UserLogFile = "$($UserLogDir)\$($User -replace '[^\w-]', '')_$($FileDate)_Auth.log";
+                $UserLogDirs += $UserLogDir;
+                CheckFiles -Dir $UserLogDir -File $UserLogFile -User "'$($User.Username)'";
+                If (-NOT (Select-String -Path $UserLogFile -Pattern "$Log" -SimpleMatch)) { 
+                    Add-Content $UserLogFile $Log; 
+                    WriteLog -Log "Missing Log:   $Log";
                 }
-                $LocalLogFile, 
-                $Log = "|  $("$($_.EventId)".PadLeft(12,"0"))  |  $($_.Time)  |  $(($_.Event).padRight(25))  |  $(($_.User).padRight(28))  |  $(($_.OriginIp).padRight(15))  |  $(($_.OriginHost).padRight(15))  |  $(($_.HostName).padRight(14))  |  $(($_.HostSN).padRight(12))  |";
             }
         }
-    } Catch { WriteLog -Log "[ERROR] Error Checking Logs and Writing Missing Logs." -Data $_; }
+    }
+    $UserLogDirs = $UserLogDirs | Select-Object -Unique;
 
 
 ####################################################################################################
@@ -432,7 +463,7 @@ Function FetchAuth {
         If ($FailedLogins -ge $Config.AlertThreshold) {
             If ($FailedLogins -ge ($LastEmailAlert.Failed_Count + $Config.AlertThreshold)) {
                 $html = '<style type="text/css">th{text-align: left; border-bottom: 1pt solid black; padding:0 8px;} td{padding:0 8px;}</style>';
-                $EventTable = $AuthEvents | Where-Object { $_.OriginIp -ne '128.186.25.7' } | Sort-Object Time | Select-Object EventId,Time,Event,User,OriginIp | ConvertTo-Html -AS Table | Out-String;
+                $EventTable = $AuthEvents | Where-Object { $_.OriginIp -ne '128.186.25.7' } | Sort-Object Time | Select-Object EventId,Time,Event,Username,OriginIp | ConvertTo-Html -AS Table | Out-String;
                 $EmailParams.Subject = "High Number of Failed Logins - $DeviceName";
                 $EmailParams.Body = $html+"Hostname: $DeviceName<br>Logs by Hostname: $HostLogFile<br>Logs by Serial: $SnLogFile<br>Logs by Users: $($UserLogDirs -join '<br>             ')<br><br>"+$EventTable;
                 Send-MailMessage @EmailParams -BodyAsHtml;
@@ -453,7 +484,9 @@ If ($Config.CheckMonthBefore) {
 }
 
 FetchAuth -Earliest $EarliestLog -Latest (Get-Date) -FileDate (Get-Date -UFormat "%Y-%b");
+Write-Host "Script Completed in $([math]::Round((New-TimeSpan -Start $ScriptStart -End (Get-Date)).TotalSeconds, 1)) Seconds. Random Offset was $RandomNumber Seconds.";
 
 WriteLog -Log "----------------------------------------- End ----------------------------------------";
 
 Exit 0;
+
